@@ -1,48 +1,86 @@
-const { program } = require('commander');
-const http = require('http');
-const fs = require('fs');
-const path = require('path');
+const express = require('express');
+const fs = require('fs/promises');
+const xml2js = require('xml2js');
 
-// Configure command line arguments
-program
-  .requiredOption('-h, --host <host>', 'Server address')
-  .requiredOption('-p, --port <port>', 'Server port')
-  .requiredOption('-i, --input <input>', 'Path to the NBU JSON input file')
-  .parse(process.argv);
+const app = express();
+const PORT = 3000;
 
-const options = program.opts();
-
-// Check if input file exists
-const inputFilePath = path.resolve(options.input);
-if (!fs.existsSync(inputFilePath)) {
-  console.error('Cannot find input file');
-  process.exit(1);
+// Асинхронна функція для читання JSON файлу
+async function readJSONFile(filePath) {
+  try {
+    const data = await fs.readFile(filePath, 'utf8');
+    return JSON.parse(data);
+  } catch (error) {
+    console.error('Помилка читання JSON файлу:', error);
+    throw error;
+  }
 }
 
-// Read and parse the input file
-let nbuData;
-try {
-  const fileContent = fs.readFileSync(inputFilePath, 'utf8');
-  nbuData = JSON.parse(fileContent);
-} catch (error) {
-  console.error('Error reading or parsing the input file:', error.message);
-  process.exit(1);
+// Функція для знаходження активу з найменшим значенням
+function findMinAsset(assets) {
+  if (!assets || !Array.isArray(assets) || assets.length === 0) {
+    throw new Error('Не знайдено валідних активів у даних');
+  }
+
+  // Відфільтруємо активи з валідними числовими значеннями
+  const validAssets = assets.filter(asset => 
+    asset.hasOwnProperty('value') && 
+    !isNaN(parseFloat(asset.value))
+  );
+
+  if (validAssets.length === 0) {
+    throw new Error('Не знайдено активів з валідними числовими значеннями');
+  }
+
+  // Знаходимо актив з найменшим значенням
+  return validAssets.reduce((minAsset, currentAsset) => {
+    const currentValue = parseFloat(currentAsset.value);
+    const minValue = parseFloat(minAsset.value);
+    return currentValue < minValue ? currentAsset : minAsset;
+  });
 }
 
-// Create HTTP server
-const server = http.createServer((req, res) => {
-  res.writeHead(200, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify(nbuData));
+// Асинхронна функція для створення XML з активом, що має найменше значення
+async function createXMLWithMinAsset(minAsset) {
+  return new Promise((resolve, reject) => {
+    try {
+      const builder = new xml2js.Builder();
+      const xmlObj = {
+        data: {
+          min_value: minAsset.value.toString()
+        }
+      };
+      
+      const xmlString = builder.buildObject(xmlObj);
+      resolve(xmlString);
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
+
+// Головний обробник маршруту з використанням async/await
+app.get('*', async (req, res) => {
+  try {
+    // Асинхронно читаємо JSON дані з файлу
+    const jsonData = await readJSONFile('./data.json');
+    
+    // Знаходимо актив з найменшим значенням
+    const minAsset = findMinAsset(jsonData);
+    
+    // Асинхронно створюємо XML відповідь, що містить лише актив з найменшим значенням
+    const xmlResponse = await createXMLWithMinAsset(minAsset);
+    
+    // Відправляємо XML відповідь
+    res.setHeader('Content-Type', 'application/xml');
+    res.send(xmlResponse);
+  } catch (error) {
+    console.error('Помилка обробки запиту:', error);
+    res.status(500).send(`Помилка: ${error.message}`);
+  }
 });
 
-// Start the server
-server.listen(options.port, options.host, () => {
-  console.log(`Server running at http://${options.host}:${options.port}/`);
-  console.log('Press Ctrl+C to stop the server');
-});
-
-// Handle server errors
-server.on('error', (error) => {
-  console.error('Server error:', error.message);
-  process.exit(1);
+// Запускаємо сервер і логуємо, коли він готовий
+app.listen(PORT, () => {
+  console.log(`Сервер запущено на порту ${PORT}`);
 });
